@@ -1,0 +1,29 @@
+# Visual Studio build output
+x64/
+x86/
+Debug/
+Release/
+*.user
+*.suo
+*.aps
+.vs/
+
+# Compiled object files
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# NuGet packages (can be restored)
+packages/
+
+# VS cache / IntelliSense
+ipch/
+*.opensdf
+*.sdf
+*.ncb
+*.VC.db
+*.VC.opendb
