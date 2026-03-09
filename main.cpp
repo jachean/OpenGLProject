@@ -47,7 +47,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 static const int   SCR_W = 1280;
 static const int   SCR_H = 720;
-static const char* TITLE = "GPS – P1: Scene within a cube";
+static const char* TITLE = "GPS – P2: Street Circuit & Static Objects";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Camera
@@ -235,6 +235,96 @@ static GLuint makeTerrainTexture()
             px[(y * W + x) * 3 + 0] = (unsigned char)std::min(r, 255);
             px[(y * W + x) * 3 + 1] = (unsigned char)std::min(g, 255);
             px[(y * W + x) * 3 + 2] = (unsigned char)std::min(b, 255);
+        }
+    }
+    return makeTexture2D(W, H, px);
+}
+
+// Road / asphalt texture – dark gray with a dashed centre line and edge markings.
+// U direction = along the road, V direction = inner(0) to outer(1) edge.
+static GLuint makeRoadTexture()
+{
+    const int W = 512, H = 128;
+    std::vector<unsigned char> px(W * H * 3);
+
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float fv = (float)y / H;
+            float n  = 0.5f + 0.5f * noise2(x * 7, y * 7 + 31);
+            int r = (int)(36 + 10 * n);
+            int g = (int)(36 + 10 * n);
+            int b = (int)(40 + 10 * n);
+            // Dashed centre line
+            if (std::abs(fv - 0.5f) < 0.04f && (x % 32) < 20)
+                r = g = b = 230;
+            // Edge stripes
+            if (fv < 0.07f || fv > 0.93f) {
+                float et = (fv < 0.5f) ? (1.0f - fv / 0.07f) : ((fv - 0.93f) / 0.07f);
+                r = (int)(36 + et * 190);
+                g = (int)(36 + et * 190);
+                b = (int)(40 + et * 190);
+            }
+            px[(y*W+x)*3+0] = (unsigned char)std::min(r, 255);
+            px[(y*W+x)*3+1] = (unsigned char)std::min(g, 255);
+            px[(y*W+x)*3+2] = (unsigned char)std::min(b, 255);
+        }
+    }
+    return makeTexture2D(W, H, px);
+}
+
+// Building texture – concrete wall with a grid of tinted windows.
+static GLuint makeBuildingTexture()
+{
+    const int W = 256, H = 256;
+    std::vector<unsigned char> px(W * H * 3);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float n = 0.5f + 0.5f * noise2(x, y + 500);
+            bool winRow = ((y % 32) >= 4  && (y % 32) <= 24);
+            bool winCol = ((x % 24) >= 3  && (x % 24) <= 18);
+            if (winRow && winCol) {
+                px[(y*W+x)*3+0] = (unsigned char)(70  + (int)(20 * n));
+                px[(y*W+x)*3+1] = (unsigned char)(95  + (int)(30 * n));
+                px[(y*W+x)*3+2] = (unsigned char)(135 + (int)(40 * n));
+            } else {
+                int v = (int)(165 + 22 * n);
+                px[(y*W+x)*3+0] = (unsigned char)std::min(v,     255);
+                px[(y*W+x)*3+1] = (unsigned char)std::min(v,     255);
+                px[(y*W+x)*3+2] = (unsigned char)std::min(v - 5, 255);
+            }
+        }
+    }
+    return makeTexture2D(W, H, px);
+}
+
+// Leaf texture – varied greens for the tree crown cone.
+static GLuint makeLeafTexture()
+{
+    const int W = 128, H = 128;
+    std::vector<unsigned char> px(W * H * 3);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float n = 0.5f + 0.5f * noise2(x * 3, y * 3 + 200);
+            px[(y*W+x)*3+0] = (unsigned char)(22  + (int)(18 * n));
+            px[(y*W+x)*3+1] = (unsigned char)(100 + (int)(55 * n));
+            px[(y*W+x)*3+2] = (unsigned char)(18  + (int)(14 * n));
+        }
+    }
+    return makeTexture2D(W, H, px);
+}
+
+// Bark texture – brown streaks for the tree trunk box.
+static GLuint makeBarkTexture()
+{
+    const int W = 64, H = 128;
+    std::vector<unsigned char> px(W * H * 3);
+    for (int y = 0; y < H; y++) {
+        for (int x = 0; x < W; x++) {
+            float n = 0.5f + 0.5f * noise2(x, y * 2 + 700);
+            float s = 0.5f + 0.5f * std::sin(y * 0.9f + n * 2.0f);
+            px[(y*W+x)*3+0] = (unsigned char)(78  + (int)(42 * s + 14 * n));
+            px[(y*W+x)*3+1] = (unsigned char)(52  + (int)(28 * s + 10 * n));
+            px[(y*W+x)*3+2] = (unsigned char)(28  + (int)(16 * s +  8 * n));
         }
     }
     return makeTexture2D(W, H, px);
@@ -521,6 +611,152 @@ static Mesh createTerrainMesh(int gridSize, float scale,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Oval street circuit mesh
+// ─────────────────────────────────────────────────────────────────────────────
+static Mesh createCircuitMesh(float semiX, float semiZ,
+                               float roadHalfWidth, int segments)
+{
+    float totalLen = 0.0f;
+    {
+        float px = semiX, pz = 0.0f;
+        for (int i = 1; i <= segments; i++) {
+            float t  = 2.0f * (float)M_PI * i / segments;
+            float cx = semiX * std::cos(t), cz = semiZ * std::sin(t);
+            float dx = cx - px, dz = cz - pz;
+            totalLen += std::sqrt(dx*dx + dz*dz);
+            px = cx; pz = cz;
+        }
+    }
+
+    std::vector<float>        verts;
+    std::vector<unsigned int> indices;
+    float arcLen = 0.0f, prevCx = semiX, prevCz = 0.0f;
+
+    for (int i = 0; i <= segments; i++) {
+        float t  = 2.0f * (float)M_PI * i / segments;
+        float cx = semiX * std::cos(t), cz = semiZ * std::sin(t);
+        if (i > 0) {
+            float dx = cx - prevCx, dz = cz - prevCz;
+            arcLen += std::sqrt(dx*dx + dz*dz);
+        }
+        float u = arcLen / (roadHalfWidth * 2.0f);
+
+        float nx = std::cos(t) / semiX, nz = std::sin(t) / semiZ;
+        float nl = std::sqrt(nx*nx + nz*nz);
+        nx /= nl;  nz /= nl;
+
+        float ix = cx - nx * roadHalfWidth, iz = cz - nz * roadHalfWidth;
+        verts.insert(verts.end(), {ix, 0.02f, iz,  u, 0.0f,  0.0f, 1.0f, 0.0f});
+        float ox = cx + nx * roadHalfWidth, oz = cz + nz * roadHalfWidth;
+        verts.insert(verts.end(), {ox, 0.02f, oz,  u, 1.0f,  0.0f, 1.0f, 0.0f});
+
+        prevCx = cx;  prevCz = cz;
+    }
+
+    for (int i = 0; i < segments; i++) {
+        unsigned int a = i*2, b = i*2+1, c = (i+1)*2, d = (i+1)*2+1;
+        indices.push_back(a); indices.push_back(c); indices.push_back(b);
+        indices.push_back(b); indices.push_back(c); indices.push_back(d);
+    }
+
+    Mesh m{};
+    m.indexCount = (int)indices.size();
+    glGenVertexArrays(1, &m.vao); glGenBuffers(1, &m.vbo); glGenBuffers(1, &m.ebo);
+    glBindVertexArray(m.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size()*sizeof(float)), verts.data(), GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indices.size()*sizeof(unsigned int)), indices.data(), GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)0);              glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8*sizeof(float), (void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+    return m;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Box mesh – buildings and tree trunks.  Origin at centre of base (y=0 to h).
+// ─────────────────────────────────────────────────────────────────────────────
+static Mesh createBoxMesh(float w, float h, float d)
+{
+    float hw = w*0.5f, hd = d*0.5f;
+    std::vector<float> verts = {
+        -hw,0, hd, 0,0, 0,0,1,   hw,0, hd, 1,0, 0,0,1,   hw,h, hd, 1,1, 0,0,1,  -hw,h, hd, 0,1, 0,0,1,
+         hw,0,-hd, 0,0, 0,0,-1, -hw,0,-hd, 1,0, 0,0,-1, -hw,h,-hd, 1,1, 0,0,-1,  hw,h,-hd, 0,1, 0,0,-1,
+        -hw,0,-hd, 0,0,-1,0,0, -hw,0, hd, 1,0,-1,0,0, -hw,h, hd, 1,1,-1,0,0, -hw,h,-hd, 0,1,-1,0,0,
+         hw,0, hd, 0,0, 1,0,0,  hw,0,-hd, 1,0, 1,0,0,  hw,h,-hd, 1,1, 1,0,0,  hw,h, hd, 0,1, 1,0,0,
+        -hw,h, hd, 0,0, 0,1,0,  hw,h, hd, 1,0, 0,1,0,  hw,h,-hd, 1,1, 0,1,0, -hw,h,-hd, 0,1, 0,1,0,
+        -hw,0,-hd, 0,0, 0,-1,0,  hw,0,-hd, 1,0, 0,-1,0,  hw,0, hd, 1,1, 0,-1,0, -hw,0, hd, 0,1, 0,-1,0,
+    };
+    unsigned int idx[36];
+    for (int f=0; f<6; f++) {
+        unsigned int b=f*4;
+        idx[f*6+0]=b; idx[f*6+1]=b+1; idx[f*6+2]=b+2;
+        idx[f*6+3]=b; idx[f*6+4]=b+2; idx[f*6+5]=b+3;
+    }
+    Mesh m{}; m.indexCount=36;
+    glGenVertexArrays(1,&m.vao); glGenBuffers(1,&m.vbo); glGenBuffers(1,&m.ebo);
+    glBindVertexArray(m.vao);
+    glBindBuffer(GL_ARRAY_BUFFER,m.vbo);
+    glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(verts.size()*sizeof(float)),verts.data(),GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,m.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,sizeof(idx),idx,GL_STATIC_DRAW);
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)0);              glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2,3,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+    return m;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cone mesh – tree crown.  Apex at (0, height, 0), base at y=0.
+// ─────────────────────────────────────────────────────────────────────────────
+static Mesh createConeMesh(float radius, float height, int segments)
+{
+    std::vector<float>        verts;
+    std::vector<unsigned int> indices;
+
+    for (int i = 0; i < segments; i++) {
+        float a0 = 2.0f*(float)M_PI*i/segments, a1 = 2.0f*(float)M_PI*(i+1)/segments;
+        float amid = (a0+a1)*0.5f;
+        float x0=radius*std::cos(a0), z0=radius*std::sin(a0);
+        float x1=radius*std::cos(a1), z1=radius*std::sin(a1);
+        glm::vec3 n = glm::normalize(glm::vec3(height*std::cos(amid), radius, height*std::sin(amid)));
+        unsigned int base = (unsigned int)verts.size()/8;
+        verts.insert(verts.end(), {0.0f,height,0.0f, (a0+a1)/(2.0f*(float)M_PI),1.0f, n.x,n.y,n.z});
+        verts.insert(verts.end(), {x0,0.0f,z0, (float)i/segments,0.0f, n.x,n.y,n.z});
+        verts.insert(verts.end(), {x1,0.0f,z1, (float)(i+1)/segments,0.0f, n.x,n.y,n.z});
+        indices.push_back(base); indices.push_back(base+2); indices.push_back(base+1);
+    }
+    // base cap
+    unsigned int ci = (unsigned int)verts.size()/8;
+    verts.insert(verts.end(), {0.0f,0.0f,0.0f, 0.5f,0.5f, 0.0f,-1.0f,0.0f});
+    for (int i=0; i<segments; i++) {
+        float a=2.0f*(float)M_PI*i/segments;
+        verts.insert(verts.end(), {radius*std::cos(a),0.0f,radius*std::sin(a),
+            0.5f+0.5f*std::cos(a), 0.5f+0.5f*std::sin(a), 0.0f,-1.0f,0.0f});
+    }
+    for (int i=0; i<segments; i++) {
+        indices.push_back(ci);
+        indices.push_back(ci+1+i);
+        indices.push_back(ci+1+(i+1)%segments);
+    }
+
+    Mesh m{}; m.indexCount=(int)indices.size();
+    glGenVertexArrays(1,&m.vao); glGenBuffers(1,&m.vbo); glGenBuffers(1,&m.ebo);
+    glBindVertexArray(m.vao);
+    glBindBuffer(GL_ARRAY_BUFFER,m.vbo);
+    glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(verts.size()*sizeof(float)),verts.data(),GL_STATIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER,m.ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,(GLsizeiptr)(indices.size()*sizeof(unsigned int)),indices.data(),GL_STATIC_DRAW);
+    glVertexAttribPointer(0,3,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)0);              glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1,2,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)(3*sizeof(float))); glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2,3,GL_FLOAT,GL_FALSE,8*sizeof(float),(void*)(5*sizeof(float))); glEnableVertexAttribArray(2);
+    glBindVertexArray(0);
+    return m;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GLFW callbacks
 // ─────────────────────────────────────────────────────────────────────────────
 static void cbFramebufferSize(GLFWwindow*, int w, int h)
@@ -608,17 +844,19 @@ int main()
     // ── Meshes ───────────────────────────────────────────────────────────────
     SkyboxMesh skyboxMesh = createSkyboxMesh();
     Mesh       groundMesh = createGroundMesh(18.0f);
-    Mesh       terrainMesh = createTerrainMesh(
-        /*gridSize*/ 64,
-        /*scale*/    10.0f,
-        /*amplitude*/ 2.5f,
-        /*freq*/      0.35f
-    );
+    Mesh       terrainMesh = createTerrainMesh(64, 6.0f, 1.5f, 0.35f);  // scaled to fit inside circuit
+    Mesh       circuitMesh = createCircuitMesh(12.0f, 8.0f, 1.5f, 120);
+    Mesh       boxMesh     = createBoxMesh(1.0f, 1.0f, 1.0f);
+    Mesh       coneMesh    = createConeMesh(1.0f, 1.0f, 16);
 
     // ── Textures ─────────────────────────────────────────────────────────────
     GLuint skyboxTex   = makeSkyboxCubemap();
     GLuint grassTex    = makeGrassTexture();
     GLuint terrainTex  = makeTerrainTexture();
+    GLuint roadTex     = makeRoadTexture();
+    GLuint buildingTex = makeBuildingTexture();
+    GLuint leafTex     = makeLeafTexture();
+    GLuint barkTex     = makeBarkTexture();
 
     // ── Constant uniforms ────────────────────────────────────────────────────
     glm::vec3 lightDir   = glm::normalize(glm::vec3(-0.4f, -1.0f, -0.5f));
@@ -682,16 +920,66 @@ int main()
         glBindVertexArray(groundMesh.vao);
         glDrawElements(GL_TRIANGLES, groundMesh.indexCount, GL_UNSIGNED_INT, nullptr);
 
-        // ── Terrain ──────────────────────────────────────────────────────────
-        // Offset slightly above y = 0 so it sits on top of the ground plane
+        // ── Terrain (infield hills) ───────────────────────────────────────────
         glm::mat4 terrainModel = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.05f, 0.0f));
-
-        setMat4(terrainProg, "model",      terrainModel);
-        setBool(terrainProg, "heightBlend", true);   // hills → colour by height
-
+        setMat4(terrainProg, "model",       terrainModel);
+        setBool(terrainProg, "heightBlend", true);
         glBindTexture(GL_TEXTURE_2D, terrainTex);
         glBindVertexArray(terrainMesh.vao);
         glDrawElements(GL_TRIANGLES, terrainMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+
+        // ── Circuit ───────────────────────────────────────────────────────────
+        setMat4(terrainProg, "model",       glm::mat4(1.0f));
+        setBool(terrainProg, "heightBlend", false);
+        glBindTexture(GL_TEXTURE_2D, roadTex);
+        glBindVertexArray(circuitMesh.vao);
+        glDrawElements(GL_TRIANGLES, circuitMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+
+        // ── Static objects ────────────────────────────────────────────────────
+        auto drawBox = [&](const glm::mat4& m, GLuint tex) {
+            setMat4(terrainProg, "model", m);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glBindVertexArray(boxMesh.vao);
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        };
+        auto drawCone = [&](const glm::mat4& m, GLuint tex) {
+            setMat4(terrainProg, "model", m);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glBindVertexArray(coneMesh.vao);
+            glDrawElements(GL_TRIANGLES, coneMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        };
+        setBool(terrainProg, "heightBlend", false);
+
+        // 6 buildings
+        struct BldgDef { float x, z, w, h, d; };
+        static const BldgDef buildings[] = {
+            { -14.5f, -4.0f,  2.5f, 5.5f, 2.0f },
+            { -14.5f,  0.0f,  2.5f, 7.0f, 2.0f },
+            { -14.5f,  4.0f,  2.5f, 5.0f, 2.0f },
+            {  15.0f, -3.0f,  4.0f, 3.0f, 3.5f },
+            {  15.0f,  3.0f,  4.0f, 3.0f, 3.5f },
+            {   0.0f, 11.5f,  1.5f, 8.0f, 1.5f },
+        };
+        for (const auto& b : buildings) {
+            glm::mat4 bm = glm::scale(
+                glm::translate(glm::mat4(1.0f), glm::vec3(b.x, 0.0f, b.z)),
+                glm::vec3(b.w, b.h, b.d));
+            drawBox(bm, buildingTex);
+        }
+
+        // 5 trees (trunk + crown)
+        struct TreePos { float x, z; };
+        static const TreePos trees[] = {
+            {  3.0f,  2.0f }, { -4.0f,  3.5f }, {  2.0f, -4.0f },
+            { -3.5f, -3.0f }, {  5.0f,  0.5f },
+        };
+        for (const auto& tr : trees) {
+            glm::vec3 base(tr.x, 0.0f, tr.z);
+            drawBox(glm::scale(glm::translate(glm::mat4(1.0f), base),
+                               glm::vec3(0.25f, 1.5f, 0.25f)), barkTex);
+            drawCone(glm::scale(glm::translate(glm::mat4(1.0f), base + glm::vec3(0.0f, 1.5f, 0.0f)),
+                                glm::vec3(0.9f, 1.8f, 0.9f)), leafTex);
+        }
 
         glBindVertexArray(0);
 
@@ -711,6 +999,13 @@ int main()
     glDeleteTextures(1, &skyboxTex);
     glDeleteTextures(1, &grassTex);
     glDeleteTextures(1, &terrainTex);
+    glDeleteTextures(1, &roadTex);
+    glDeleteTextures(1, &buildingTex);
+    glDeleteTextures(1, &leafTex);
+    glDeleteTextures(1, &barkTex);
+    glDeleteVertexArrays(1, &circuitMesh.vao); glDeleteBuffers(1, &circuitMesh.vbo); glDeleteBuffers(1, &circuitMesh.ebo);
+    glDeleteVertexArrays(1, &boxMesh.vao);     glDeleteBuffers(1, &boxMesh.vbo);     glDeleteBuffers(1, &boxMesh.ebo);
+    glDeleteVertexArrays(1, &coneMesh.vao);    glDeleteBuffers(1, &coneMesh.vbo);    glDeleteBuffers(1, &coneMesh.ebo);
     glDeleteProgram(skyboxProg);
     glDeleteProgram(terrainProg);
 
