@@ -37,5 +37,11 @@
     <None Include="shaders\terrain.frag">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="shaders\depth.vert">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\depth.frag">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>
