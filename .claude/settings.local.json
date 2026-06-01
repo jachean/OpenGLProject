@@ -3,7 +3,10 @@
     "allow": [
       "Bash(gh auth:*)",
       "Bash(git --version:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(git merge:*)",
+      "Bash(git checkout:*)",
+      "Bash(git branch:*)"
     ]
   }
 }

@@ -38,6 +38,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <random>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Window / render settings
@@ -105,6 +106,139 @@ static Camera g_cam;
 static bool   g_firstMouse = true;
 static float  g_lastX = SCR_W / 2.0f, g_lastY = SCR_H / 2.0f;
 static float  g_dt = 0.0f, g_lastFrame = 0.0f;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Building data  (global so collision and shadow passes share it)
+// ─────────────────────────────────────────────────────────────────────────────
+struct BldgDef { float x, z, w, h, d; };
+static const BldgDef g_buildings[] = {
+    { -14.5f, -4.0f,  2.5f, 5.5f, 2.0f },
+    { -14.5f,  0.0f,  2.5f, 7.0f, 2.0f },
+    { -14.5f,  4.0f,  2.5f, 5.0f, 2.0f },
+    {  15.0f, -3.0f,  4.0f, 3.0f, 3.5f },
+    {  15.0f,  3.0f,  4.0f, 3.0f, 3.5f },
+    {   0.0f, 11.5f,  1.5f, 8.0f, 1.5f },
+};
+static const int NUM_BUILDINGS = 6;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Controllable car  (C1)
+// ─────────────────────────────────────────────────────────────────────────────
+struct Car {
+    glm::vec3 position = glm::vec3(12.0f, 0.0f, 0.0f);
+    float     heading  = 90.0f;   // degrees; 0=+X, 90=+Z (circuit start)
+    float     speed    = 0.0f;
+    float     maxSpeed = 10.0f;
+    float     accel    = 12.0f;
+    float     turnRate = 90.0f;   // degrees per second
+};
+static Car  g_car;
+static bool g_followCam   = false;
+static bool g_fWasDown    = false;
+
+// Car half-extents for AABB collision (XZ plane)
+static const float CAR_HW = 0.60f;
+static const float CAR_HD = 1.00f;
+
+static bool hitsBuildings(glm::vec3 pos, float hw, float hd)
+{
+    for (int i = 0; i < NUM_BUILDINGS; i++) {
+        if (std::abs(pos.x - g_buildings[i].x) < hw + g_buildings[i].w * 0.5f &&
+            std::abs(pos.z - g_buildings[i].z) < hd + g_buildings[i].d * 0.5f)
+            return true;
+    }
+    return false;
+}
+
+static bool carHitsBuilding(glm::vec3 pos)
+{
+    return hitsBuildings(pos, CAR_HW, CAR_HD);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Circuit parameters  (shared with NPC-car update)
+// ─────────────────────────────────────────────────────────────────────────────
+static const float CIRCUIT_SX = 12.0f;
+static const float CIRCUIT_SZ =  8.0f;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RNG  (seeded once; used by pedestrian wander)
+// ─────────────────────────────────────────────────────────────────────────────
+static std::mt19937 g_rng(42);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pedestrians  (C2 – random movers)
+// ─────────────────────────────────────────────────────────────────────────────
+struct Pedestrian {
+    glm::vec3 position    = glm::vec3(0.0f);
+    float     heading     = 0.0f;   // degrees
+    float     speed       = 1.8f;
+    float     changeTimer = 0.0f;   // seconds until next direction change
+};
+static const int NUM_PEDESTRIANS = 3;
+static Pedestrian g_pedestrians[NUM_PEDESTRIANS];
+
+static void updatePedestrians(float dt)
+{
+    std::uniform_real_distribution<float> rndHeading(0.0f,   360.0f);
+    std::uniform_real_distribution<float> rndTimer  (1.5f,   3.5f);
+    const float BX = 10.5f, BZ = 6.8f;   // wander bounds (inside the circuit)
+    const float PHW = 0.15f, PHD = 0.15f; // pedestrian half-extents
+
+    for (auto& p : g_pedestrians) {
+        p.changeTimer -= dt;
+        if (p.changeTimer <= 0.0f) {
+            p.heading      = rndHeading(g_rng);
+            p.changeTimer  = rndTimer(g_rng);
+        }
+
+        float hRad = glm::radians(p.heading);
+        glm::vec3 delta(std::cos(hRad) * p.speed * dt, 0.0f,
+                        std::sin(hRad) * p.speed * dt);
+        glm::vec3 next = p.position + delta;
+
+        bool blocked = (std::abs(next.x) > BX || std::abs(next.z) > BZ)
+                       || hitsBuildings(next, PHW, PHD);
+        if (!blocked)
+            p.position = next;
+        else {
+            p.heading     = rndHeading(g_rng);
+            p.changeTimer = rndTimer(g_rng);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NPC cars  (C2 – rule-based movers: follow the oval circuit)
+// ─────────────────────────────────────────────────────────────────────────────
+struct NpcCar {
+    float     t        = 0.0f;    // current angle parameter [0, 2π)
+    float     angSpeed = 0.25f;   // rad / s
+    glm::vec3 position = glm::vec3(CIRCUIT_SX, 0.0f, 0.0f);
+    float     heading  = 90.0f;   // degrees (same convention as g_car)
+};
+static const int NUM_NPC_CARS = 2;
+static NpcCar g_npcCars[NUM_NPC_CARS];
+
+static void updateNpcCars(float dt)
+{
+    for (auto& c : g_npcCars) {
+        c.t += c.angSpeed * dt;
+        if (c.t > 2.0f * (float)M_PI)
+            c.t -= 2.0f * (float)M_PI;
+
+        c.position = glm::vec3(
+            CIRCUIT_SX * std::cos(c.t),
+            0.0f,
+            CIRCUIT_SZ * std::sin(c.t));
+
+        // Heading from circuit tangent: d/dt(SX·cos t, SZ·sin t) = (-SX·sin t, SZ·cos t)
+        glm::vec3 tangent = glm::normalize(
+            glm::vec3(-CIRCUIT_SX * std::sin(c.t), 0.0f,
+                       CIRCUIT_SZ * std::cos(c.t)));
+        c.heading = glm::degrees(std::atan2(tangent.z, tangent.x));
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shader utilities
@@ -322,6 +456,47 @@ static GLuint makeLampTexture()
         px[i*3+0] = 255;
         px[i*3+1] = 240;
         px[i*3+2] = 150;
+    }
+    return makeTexture2D(W, H, px);
+}
+
+// Car paint – solid red body, darker roof stripe
+static GLuint makeCarTexture()
+{
+    const int W = 8, H = 8;
+    std::vector<unsigned char> px(W * H * 3);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            bool roofStripe = (x >= 2 && x <= 5 && y >= 2 && y <= 5);
+            px[(y*W+x)*3+0] = roofStripe ? 140 : 210;
+            px[(y*W+x)*3+1] = roofStripe ?  20 :  25;
+            px[(y*W+x)*3+2] = roofStripe ?  20 :  25;
+        }
+    return makeTexture2D(W, H, px);
+}
+
+// NPC car paint – blue
+static GLuint makeNpcCarTexture()
+{
+    const int W = 4, H = 4;
+    std::vector<unsigned char> px(W * H * 3);
+    for (int i = 0; i < W * H; i++) {
+        px[i*3+0] = 30;
+        px[i*3+1] = 80;
+        px[i*3+2] = 210;
+    }
+    return makeTexture2D(W, H, px);
+}
+
+// Pedestrian jacket – dark teal
+static GLuint makePedestrianTexture()
+{
+    const int W = 4, H = 4;
+    std::vector<unsigned char> px(W * H * 3);
+    for (int i = 0; i < W * H; i++) {
+        px[i*3+0] = 30;
+        px[i*3+1] = 120;
+        px[i*3+2] = 110;
     }
     return makeTexture2D(W, H, px);
 }
@@ -737,18 +912,55 @@ static void processInput(GLFWwindow* win)
     if (glfwGetKey(win, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(win, true);
 
-    float spd = g_cam.speed * g_dt;
-    if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) g_cam.position += g_cam.front * spd;
-    if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) g_cam.position -= g_cam.front * spd;
-    if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) g_cam.position -= g_cam.right * spd;
-    if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) g_cam.position += g_cam.right * spd;
-    if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) g_cam.position -= g_cam.up    * spd;
-    if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) g_cam.position += g_cam.up    * spd;
+    // ── Follow-cam toggle (F key, edge-triggered) ────────────────────────────
+    bool fDown = (glfwGetKey(win, GLFW_KEY_F) == GLFW_PRESS);
+    if (fDown && !g_fWasDown) {
+        g_followCam = !g_followCam;
+        g_cam.roll  = 0.0f;
+        g_cam.updateVectors();
+    }
+    g_fWasDown = fDown;
 
-    // Z / X  –  roll clockwise / counter-clockwise  (P3)
-    float rollSpd = 45.0f * g_dt;   // degrees per second
-    if (glfwGetKey(win, GLFW_KEY_Z) == GLFW_PRESS) { g_cam.roll += rollSpd; g_cam.updateVectors(); }
-    if (glfwGetKey(win, GLFW_KEY_X) == GLFW_PRESS) { g_cam.roll -= rollSpd; g_cam.updateVectors(); }
+    // ── Free camera  (disabled while follow-cam is active) ───────────────────
+    if (!g_followCam) {
+        float spd = g_cam.speed * g_dt;
+        if (glfwGetKey(win, GLFW_KEY_W) == GLFW_PRESS) g_cam.position += g_cam.front * spd;
+        if (glfwGetKey(win, GLFW_KEY_S) == GLFW_PRESS) g_cam.position -= g_cam.front * spd;
+        if (glfwGetKey(win, GLFW_KEY_A) == GLFW_PRESS) g_cam.position -= g_cam.right * spd;
+        if (glfwGetKey(win, GLFW_KEY_D) == GLFW_PRESS) g_cam.position += g_cam.right * spd;
+        if (glfwGetKey(win, GLFW_KEY_Q) == GLFW_PRESS) g_cam.position -= g_cam.up    * spd;
+        if (glfwGetKey(win, GLFW_KEY_E) == GLFW_PRESS) g_cam.position += g_cam.up    * spd;
+
+        float rollSpd = 45.0f * g_dt;
+        if (glfwGetKey(win, GLFW_KEY_Z) == GLFW_PRESS) { g_cam.roll += rollSpd; g_cam.updateVectors(); }
+        if (glfwGetKey(win, GLFW_KEY_X) == GLFW_PRESS) { g_cam.roll -= rollSpd; g_cam.updateVectors(); }
+    }
+
+    // ── Car  (I/K = throttle/brake,  J/L = steer) ───────────────────────────
+    if (glfwGetKey(win, GLFW_KEY_I) == GLFW_PRESS)
+        g_car.speed = std::min(g_car.speed + g_car.accel * g_dt, g_car.maxSpeed);
+    else if (glfwGetKey(win, GLFW_KEY_K) == GLFW_PRESS)
+        g_car.speed = std::max(g_car.speed - g_car.accel * g_dt, -g_car.maxSpeed * 0.5f);
+    else
+        g_car.speed *= std::pow(0.08f, g_dt);   // coasting drag
+
+    if (std::abs(g_car.speed) > 0.1f) {
+        float turn = g_car.turnRate * g_dt * (g_car.speed > 0 ? 1.0f : -1.0f);
+        if (glfwGetKey(win, GLFW_KEY_J) == GLFW_PRESS) g_car.heading -= turn;
+        if (glfwGetKey(win, GLFW_KEY_L) == GLFW_PRESS) g_car.heading += turn;
+    }
+
+    // Move car, resolve XZ collision independently so the car slides along walls
+    float hRad = glm::radians(g_car.heading);
+    glm::vec3 delta = glm::vec3(std::cos(hRad), 0.0f, std::sin(hRad)) * g_car.speed * g_dt;
+
+    glm::vec3 tryX = g_car.position + glm::vec3(delta.x, 0.0f, 0.0f);
+    if (!carHitsBuilding(tryX))  g_car.position.x = tryX.x;
+    else                          g_car.speed = 0.0f;
+
+    glm::vec3 tryZ = g_car.position + glm::vec3(0.0f, 0.0f, delta.z);
+    if (!carHitsBuilding(tryZ))  g_car.position.z = tryZ.z;
+    else                          g_car.speed = 0.0f;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -798,17 +1010,12 @@ int main()
     GLuint leafTex     = makeLeafTexture();
     GLuint barkTex     = makeBarkTexture();
     GLuint lampTex     = makeLampTexture();
+    GLuint carTex      = makeCarTexture();
+    GLuint npcCarTex   = makeNpcCarTexture();
+    GLuint pedTex      = makePedestrianTexture();
 
-    // ── Scene object data (used by both shadow and main passes) ──────────────
-    struct BldgDef { float x, z, w, h, d; };
-    const BldgDef buildings[] = {
-        { -14.5f, -4.0f,  2.5f, 5.5f, 2.0f },
-        { -14.5f,  0.0f,  2.5f, 7.0f, 2.0f },
-        { -14.5f,  4.0f,  2.5f, 5.0f, 2.0f },
-        {  15.0f, -3.0f,  4.0f, 3.0f, 3.5f },
-        {  15.0f,  3.0f,  4.0f, 3.0f, 3.5f },
-        {   0.0f, 11.5f,  1.5f, 8.0f, 1.5f },
-    };
+    // ── Scene object data ─────────────────────────────────────────────────────
+    // g_buildings is defined at file scope (shared with collision code).
     struct TreePos { float x, z; };
     const TreePos trees[] = {
         {  3.0f,  2.0f }, { -4.0f,  3.5f }, {  2.0f, -4.0f },
@@ -900,7 +1107,8 @@ int main()
         glDrawElements(GL_TRIANGLES, circuitMesh.indexCount, GL_UNSIGNED_INT, nullptr);
 
         // Buildings
-        for (const auto& b : buildings) {
+        for (int i = 0; i < NUM_BUILDINGS; i++) {
+            const auto& b = g_buildings[i];
             setMat4(prog, "model",
                 glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(b.x, 0.0f, b.z)),
                            glm::vec3(b.w, b.h, b.d)));
@@ -931,8 +1139,74 @@ int main()
             glBindVertexArray(boxMesh.vao);
             glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
         }
+
+        // Player car (body + roof) – casts shadows
+        {
+            float rotAngle = glm::radians(90.0f - g_car.heading);
+            glm::mat4 carBase = glm::rotate(
+                glm::translate(glm::mat4(1.0f), g_car.position),
+                rotAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+            setMat4(prog, "model", glm::scale(carBase, glm::vec3(1.1f, 0.7f, 1.9f)));
+            glBindVertexArray(boxMesh.vao);
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+            setMat4(prog, "model", glm::scale(
+                glm::translate(carBase, glm::vec3(0.0f, 0.7f, 0.1f)),
+                glm::vec3(0.75f, 0.45f, 1.0f)));
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        }
+
+        // NPC cars (C2 – rule-based)
+        glBindVertexArray(boxMesh.vao);
+        for (int i = 0; i < NUM_NPC_CARS; i++) {
+            float rotAngle = glm::radians(90.0f - g_npcCars[i].heading);
+            glm::mat4 cb = glm::rotate(
+                glm::translate(glm::mat4(1.0f), g_npcCars[i].position),
+                rotAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+            setMat4(prog, "model", glm::scale(cb, glm::vec3(1.1f, 0.7f, 1.9f)));
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+            setMat4(prog, "model", glm::scale(
+                glm::translate(cb, glm::vec3(0.0f, 0.7f, 0.1f)),
+                glm::vec3(0.75f, 0.45f, 1.0f)));
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        }
+
+        // Pedestrians (C2 – random)
+        for (int i = 0; i < NUM_PEDESTRIANS; i++) {
+            float rotAngle = glm::radians(90.0f - g_pedestrians[i].heading);
+            glm::mat4 pb = glm::rotate(
+                glm::translate(glm::mat4(1.0f), g_pedestrians[i].position),
+                rotAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+            setMat4(prog, "model", glm::scale(pb, glm::vec3(0.25f, 0.8f, 0.2f)));
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+            setMat4(prog, "model", glm::scale(
+                glm::translate(pb, glm::vec3(0.0f, 0.8f, 0.0f)),
+                glm::vec3(0.2f, 0.2f, 0.2f)));
+            glDrawElements(GL_TRIANGLES, boxMesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        }
         glBindVertexArray(0);
     };
+
+    // ── C2: initialise pedestrians and NPC cars ──────────────────────────────
+    {
+        std::uniform_real_distribution<float> rndH(0.0f, 360.0f);
+        std::uniform_real_distribution<float> rndT(0.0f, 3.0f);
+
+        g_pedestrians[0].position = glm::vec3( 3.0f, 0.0f,  2.0f);
+        g_pedestrians[1].position = glm::vec3(-4.5f, 0.0f, -2.5f);
+        g_pedestrians[2].position = glm::vec3( 1.0f, 0.0f,  5.0f);
+        for (auto& p : g_pedestrians) {
+            p.heading     = rndH(g_rng);
+            p.changeTimer = rndT(g_rng);
+        }
+
+        // NPC car 0: starts on the far side of the oval, slower
+        g_npcCars[0].t        = (float)M_PI;
+        g_npcCars[0].angSpeed = 0.22f;
+        // NPC car 1: starts at the top of the oval, faster
+        g_npcCars[1].t        = (float)M_PI * 0.5f;
+        g_npcCars[1].angSpeed = 0.35f;
+        updateNpcCars(0.0f);   // set initial positions/headings
+    }
 
     // ── Render loop ──────────────────────────────────────────────────────────
     while (!glfwWindowShouldClose(win))
@@ -942,6 +1216,21 @@ int main()
         g_lastFrame = now;
 
         processInput(win);
+
+        // C2: update moving objects
+        updatePedestrians(g_dt);
+        updateNpcCars(g_dt);
+
+        // Follow-cam: position camera behind the car, looking forward
+        if (g_followCam) {
+            float hRad = glm::radians(g_car.heading);
+            glm::vec3 fwd(std::cos(hRad), 0.0f, std::sin(hRad));
+            g_cam.position = g_car.position - fwd * 5.0f + glm::vec3(0.0f, 2.0f, 0.0f);
+            g_cam.yaw      = g_car.heading;
+            g_cam.pitch    = -10.0f;
+            g_cam.roll     = 0.0f;
+            g_cam.updateVectors();
+        }
 
         // ────────────────────────────────────────────────────────────────────
         // SHADOW PASSES  (geometry drawn from each light's POV)
@@ -1041,7 +1330,8 @@ int main()
 
         // Buildings
         setBool(terrainProg, "heightBlend", false);
-        for (const auto& b : buildings) {
+        for (int i = 0; i < NUM_BUILDINGS; i++) {
+            const auto& b = g_buildings[i];
             drawBox(glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(b.x, 0.0f, b.z)),
                                glm::vec3(b.w, b.h, b.d)), buildingTex);
         }
@@ -1070,6 +1360,42 @@ int main()
                                glm::vec3(0.55f, 0.20f, 0.55f)), lampTex);
         }
 
+        // Player car  (C1)
+        setBool(terrainProg, "heightBlend", false);
+        {
+            float rotAngle = glm::radians(90.0f - g_car.heading);
+            glm::mat4 carBase = glm::rotate(
+                glm::translate(glm::mat4(1.0f), g_car.position),
+                rotAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+            drawBox(glm::scale(carBase, glm::vec3(1.1f, 0.7f, 1.9f)), carTex);
+            drawBox(glm::scale(glm::translate(carBase, glm::vec3(0.0f, 0.7f, 0.1f)),
+                               glm::vec3(0.75f, 0.45f, 1.0f)), carTex);
+        }
+
+        // NPC cars  (C2 – rule-based, blue)
+        for (int i = 0; i < NUM_NPC_CARS; i++) {
+            float rotAngle = glm::radians(90.0f - g_npcCars[i].heading);
+            glm::mat4 cb = glm::rotate(
+                glm::translate(glm::mat4(1.0f), g_npcCars[i].position),
+                rotAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+            drawBox(glm::scale(cb, glm::vec3(1.1f, 0.7f, 1.9f)), npcCarTex);
+            drawBox(glm::scale(glm::translate(cb, glm::vec3(0.0f, 0.7f, 0.1f)),
+                               glm::vec3(0.75f, 0.45f, 1.0f)), npcCarTex);
+        }
+
+        // Pedestrians  (C2 – random, teal)
+        for (int i = 0; i < NUM_PEDESTRIANS; i++) {
+            float rotAngle = glm::radians(90.0f - g_pedestrians[i].heading);
+            glm::mat4 pb = glm::rotate(
+                glm::translate(glm::mat4(1.0f), g_pedestrians[i].position),
+                rotAngle, glm::vec3(0.0f, 1.0f, 0.0f));
+            // Body
+            drawBox(glm::scale(pb, glm::vec3(0.25f, 0.8f, 0.2f)), pedTex);
+            // Head
+            drawBox(glm::scale(glm::translate(pb, glm::vec3(0.0f, 0.8f, 0.0f)),
+                               glm::vec3(0.2f, 0.2f, 0.2f)), pedTex);
+        }
+
         glBindVertexArray(0);
 
         glfwSwapBuffers(win);
@@ -1092,6 +1418,9 @@ int main()
     glDeleteTextures(1, &leafTex);
     glDeleteTextures(1, &barkTex);
     glDeleteTextures(1, &lampTex);
+    glDeleteTextures(1, &carTex);
+    glDeleteTextures(1, &npcCarTex);
+    glDeleteTextures(1, &pedTex);
 
     glDeleteFramebuffers(1, &sunShadow.fbo); glDeleteTextures(1, &sunShadow.tex);
     for (int i = 0; i < NUM_LIGHTS; i++) {
